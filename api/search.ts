@@ -1,19 +1,50 @@
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { join } from "path";
-import { distance as levenshtein } from "fast-levenshtein";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 
 // 1) 起動時にシードを読み込み
 const DATA_PATH = join(process.cwd(), "data", "qa.jsonl");
 let QA: { q: string; a: string; source?: string }[] = [];
 try {
-  const raw = readFileSync(DATA_PATH, "utf8")
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
-  QA = raw;
+  if (existsSync(DATA_PATH)) {
+    const raw = readFileSync(DATA_PATH, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    QA = raw;
+  } else {
+    // ファイルが見つからない場合は空配列のまま（APIは404風の応答を返す）
+    console.warn("qa.jsonl not found at:", DATA_PATH);
+  }
 } catch (e) {
   console.error("QA seed not found or invalid:", e);
+  QA = [];
+}
+
+// 依存レスなレーベンシュタイン距離
+function levenshtein(a: string, b: string): number {
+  const s = a.toLowerCase();
+  const t = b.toLowerCase();
+  const n = s.length;
+  const m = t.length;
+  if (n === 0) return m;
+  if (m === 0) return n;
+  const dp = new Array(m + 1);
+  for (let j = 0; j <= m; j++) dp[j] = j;
+  for (let i = 1; i <= n; i++) {
+    let prev = dp[0];
+    dp[0] = i;
+    for (let j = 1; j <= m; j++) {
+      const temp = dp[j];
+      dp[j] = Math.min(
+        dp[j] + 1, // deletion
+        dp[j - 1] + 1, // insertion
+        prev + (s[i - 1] === t[j - 1] ? 0 : 1) // substitution
+      );
+      prev = temp;
+    }
+  }
+  return dp[m];
 }
 
 function score(query: string, item: { q: string; a: string }) {
@@ -32,30 +63,43 @@ function score(query: string, item: { q: string; a: string }) {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  if (req.method === "OPTIONS") return res.status(200).end();
-
-  const query = (req.query.q as string) || (req.body && req.body.q) || "";
-  if (!query) return res.status(400).json({ error: "q is required" });
-
-  const ranked = QA.map((item) => ({ item, s: score(query, item) }))
-    .sort((a, b) => b.s - a.s)
-    .slice(0, 3)
-    .map((r) => r.item);
-
-  // 最上位を回答として返す（出典付き）
-  const top = ranked[0];
-  const answer = top
-    ? { answer: top.a, source: top.source || "-", matches: ranked }
-    : { answer: "該当が見つかりませんでした。キーワードを変えて再検索してください。", source: "-", matches: [] };
-
-  // ついでに匿名ログ（任意）
   try {
-    const LOG_ENDPOINT = process.env.LOG_ENDPOINT;
-    if (LOG_ENDPOINT) fetch(LOG_ENDPOINT, { method: "POST", body: JSON.stringify({ q: query, ts: Date.now() }) });
-  } catch {}
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    if (req.method === "OPTIONS") return res.status(200).end();
 
-  return res.status(200).json(answer);
+    const query = (req.query.q as string) || (req.body && (req.body as any).q) || "";
+    if (!query) return res.status(400).json({ error: "q is required" });
+
+    if (!Array.isArray(QA) || QA.length === 0) {
+      return res.status(200).json({
+        answer: "データが未登録です。管理者にお問い合わせください。",
+        source: "-",
+        matches: []
+      });
+    }
+
+    const ranked = QA.map((item) => ({ item, s: score(query, item) }))
+      .sort((a, b) => b.s - a.s)
+      .slice(0, 3)
+      .map((r) => r.item);
+
+    const top = ranked[0];
+    const answer = top
+      ? { answer: top.a, source: top.source || "-", matches: ranked }
+      : { answer: "該当が見つかりませんでした。キーワードを変えて再検索してください。", source: "-", matches: [] };
+
+    // 任意: 匿名ログ（失敗しても無視）
+    try {
+      const LOG_ENDPOINT = process.env.LOG_ENDPOINT;
+      if (LOG_ENDPOINT)
+        fetch(LOG_ENDPOINT, { method: "POST", body: JSON.stringify({ q: query, ts: Date.now() }) }).catch(() => {});
+    } catch {}
+
+    return res.status(200).json(answer);
+  } catch (e: any) {
+    console.error("/api/search error:", e?.stack || e);
+    return res.status(500).json({ error: "internal_error", message: String(e?.message || e) });
+  }
 }
 
