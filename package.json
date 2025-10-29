@@ -1,0 +1,14 @@
+{
+  "name": "tsuku2-bot",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'Vercel functions use on-demand build'",
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "fast-levenshtein": "^3.0.0"
+  }
+}
+
